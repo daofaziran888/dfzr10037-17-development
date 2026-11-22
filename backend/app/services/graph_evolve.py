@@ -1,8 +1,10 @@
 """图谱演化领域服务：字段、状态和动作来自业务配置，数据处理骨架由基类复用。"""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
+from app.graph_state import graph_state
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -76,3 +78,47 @@ class GraphEvolveService(BaseModuleService):
         base = super().domain_snapshot()
         base["cross_module_consumers"] = ["quality_audit", "graph_compare"]
         return base
+
+    # ===== 现图演化：按新关系规则移除旧边、新增新边 =====
+    def apply_rule_change(
+        self,
+        remove: list[str],
+        add: list[dict[str, str]],
+        reason: str = "",
+    ) -> tuple[dict[str, Any] | None, str]:
+        """演化现图并留下演化记录，供子图文件交割按图代核对。"""
+        result = graph_state.advance(remove, add)
+        if not result["ok"]:
+            return None, str(result["message"])
+        rows = store.rows(self.MODULE)
+        next_id = max((int(r.get("id", 0)) for r in rows), default=0) + 1
+        changed = result["移除"] + result["新增"]
+        entities = sorted({
+            point
+            for edge_id in changed
+            for point in self._edge_endpoints(edge_id)
+        })
+        record: dict[str, Any] = {
+            "id": next_id,
+            "status": "已确认",
+            "pending": False,
+            "abnormal": False,
+            "记录编号": f"GRAP-EVOL-{next_id:04d}",
+            "变更类型": "关系规则冲突调整",
+            "影响实体": "、".join(entities) or "-",
+            "影响关系": f"移除 {'、'.join(result['移除']) or '无'}；新增 {'、'.join(result['新增']) or '无'}",
+            "版本标签": result["图代"],
+            "变更描述": reason or "按新关系规则调整现图",
+            "回滚版本": result["上一图代"],
+            "演化时间": datetime.now().strftime("%Y-%m-%d"),
+        }
+        rows.append(record)
+        result["演化记录"] = record["记录编号"]
+        return result, f"现图已演化至 {result['图代']}，演化记录 {record['记录编号']} 已登记"
+
+    @staticmethod
+    def _edge_endpoints(edge_id: str) -> tuple[str, ...]:
+        edge = graph_state.edge(edge_id)
+        if edge is None:
+            return ()
+        return (str(edge["起点"]), str(edge["终点"]))

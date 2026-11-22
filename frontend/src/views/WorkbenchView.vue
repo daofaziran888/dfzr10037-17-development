@@ -60,6 +60,15 @@
             >
               {{ action }}
             </button>
+            <button
+              v-if="meta.key === 'subgraph_exp'"
+              class="link"
+              type="button"
+              :data-testid="`save-as-${row.id}`"
+              @click="saveAsFile(row)"
+            >
+              另存子图文件
+            </button>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -69,6 +78,56 @@
         </tr>
       </tbody>
     </table>
+
+    <section v-if="meta.key === 'subgraph_exp'" class="subgraph-file-panel" data-testid="subgraph-file-panel">
+      <h3>可复查子图文件</h3>
+      <p class="graph-state-line" data-testid="graph-state">
+        <span>现图图代：{{ graphState?.图代 ?? '—' }}</span>
+        <span>生效边：{{ edgeText(graphState?.生效边) }}</span>
+        <span>已移除：{{ edgeText(graphState?.已移除边) }}</span>
+        <button class="btn" data-testid="evolve-graph" type="button" @click="evolveCurrentGraph">
+          应用新关系规则（移除 r7、新增 r9）
+        </button>
+      </p>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>文件编号</th>
+            <th>探查种子</th>
+            <th>扩展深度</th>
+            <th>邻边清单</th>
+            <th>图代</th>
+            <th>状态</th>
+            <th>交割操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="file in subgraphFiles" :key="file.id" :data-testid="`file-${file.id}`">
+            <td>{{ file.文件编号 }}</td>
+            <td>{{ file.探查种子 }}</td>
+            <td>{{ file.扩展深度 }}</td>
+            <td>{{ file.邻边清单.join('、') }}</td>
+            <td>{{ file.图代 }}</td>
+            <td>{{ file.status }}</td>
+            <td class="row-actions">
+              <button class="link" type="button" :data-testid="`handoff-${file.id}`" @click="handoffFile(file)">
+                交接图谱搜索
+              </button>
+              <button class="link" type="button" :data-testid="`replay-${file.id}`" @click="replayFile(file)">
+                重放校验
+              </button>
+              <button class="link" type="button" :data-testid="`evidence-${file.id}`" @click="downloadEvidence(file)">
+                下载证据附件
+              </button>
+            </td>
+          </tr>
+          <tr v-if="!subgraphFiles.length">
+            <td colspan="7" class="empty-state">暂无可复查子图文件，可在上方探查配置行另存</td>
+          </tr>
+        </tbody>
+      </table>
+      <pre v-if="fileMessage" class="file-message" data-testid="file-message">{{ fileMessage }}</pre>
+    </section>
 
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
@@ -103,7 +162,16 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/backend-service'
-import type { EntryRow } from '@/data/types'
+import {
+  downloadSubgraphEvidence,
+  evolveGraph,
+  handoffSubgraphFile,
+  listSubgraphFiles,
+  loadGraphState,
+  replaySubgraphFile,
+  saveAsSubgraphFile,
+} from '@/domain/subgraph_exp'
+import type { EntryRow, GraphEdge, GraphStateSnapshot, SubgraphFile } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)
@@ -187,5 +255,108 @@ async function reload() {
   }
 }
 
-onMounted(reload)
+// ===== 子图探查：可复查子图文件交割 =====
+const isSubgraphExp = meta.key === 'subgraph_exp'
+const graphState = ref<GraphStateSnapshot | null>(null)
+const subgraphFiles = ref<SubgraphFile[]>([])
+const fileMessage = ref('')
+
+function edgeText(edges: GraphEdge[] | undefined): string {
+  if (!edges || !edges.length) return '无'
+  return edges.map((edge) => edge.边编号).join('、')
+}
+
+async function refreshSubgraphPanel() {
+  if (!isSubgraphExp) return
+  try {
+    const [state, files] = await Promise.all([loadGraphState(), listSubgraphFiles()])
+    graphState.value = state
+    subgraphFiles.value = files
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '子图文件读取失败'
+  }
+}
+
+async function saveAsFile(row: EntryRow) {
+  errorMessage.value = ''
+  fileMessage.value = ''
+  try {
+    const result = await saveAsSubgraphFile(Number(row.id))
+    if (!result.ok) throw new Error(result.message)
+    fileMessage.value = result.message
+    await refreshSubgraphPanel()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '另存子图文件失败'
+  }
+}
+
+async function evolveCurrentGraph() {
+  errorMessage.value = ''
+  fileMessage.value = ''
+  try {
+    const result = await evolveGraph()
+    fileMessage.value = result.message
+    await refreshSubgraphPanel()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '现图演化失败'
+  }
+}
+
+async function handoffFile(file: SubgraphFile) {
+  errorMessage.value = ''
+  fileMessage.value = ''
+  try {
+    const result = await handoffSubgraphFile(file.id)
+    const handoff = result.handoff
+    const lines = [result.message]
+    if (result.ok && handoff) {
+      lines.push(`可导航邻接组：${handoff.可导航邻接.join('、') || '无'}（可直接发动下一次扩展）`)
+      lines.push(`失效复查邻接组：${handoff.失效复查邻接.join('、') || '无'}（仅复查）`)
+      lines.push(`新一轮检索种子：${handoff.检索种子.join('、') || '无'}`)
+      lines.push(`待复查边界：${handoff.待复查边界.join('、') || '无'}`)
+      lines.push(`图谱搜索待办：${handoff.图谱搜索待办 || '无'}`)
+    }
+    fileMessage.value = lines.join('\n')
+    if (!result.ok) errorMessage.value = result.message
+    await refreshSubgraphPanel()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '交接失败'
+  }
+}
+
+async function replayFile(file: SubgraphFile) {
+  errorMessage.value = ''
+  fileMessage.value = ''
+  try {
+    const result = await replaySubgraphFile(file.id)
+    const replay = result.replay
+    const lines = [result.message]
+    if (replay) {
+      for (const check of replay.文件边核对) {
+        lines.push(
+          `边 ${check.边编号}：文件图代状态 ${check.文件图代状态}，现图状态 ${check.现图状态}，重放生效 ${check.重放生效 ? '是' : '否'}`,
+        )
+      }
+      if (replay.重放拦截.length) lines.push(`重放拦截：${replay.重放拦截.join('；')}`)
+      lines.push(`当前可导航邻接：${replay.可导航邻接.join('、') || '无'}`)
+    }
+    fileMessage.value = lines.join('\n')
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '重放校验失败'
+  }
+}
+
+async function downloadEvidence(file: SubgraphFile) {
+  errorMessage.value = ''
+  try {
+    await downloadSubgraphEvidence(file)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '证据附件下载失败'
+  }
+}
+
+onMounted(() => {
+  void reload()
+  void refreshSubgraphPanel()
+})
 </script>

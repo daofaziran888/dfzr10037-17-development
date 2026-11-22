@@ -29,3 +29,17 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+
+
+class SaveAsPayload(BaseModel):
+    """另存可复查子图文件：可选指定选中邻边，缺省取种子在扩展深度内的全部生效邻边。"""
+
+    edges: list[str] | None = None
+
+
+class EvolvePayload(BaseModel):
+    """现图演化：按新关系规则移除旧边、新增新边，图代递进一代。"""
+
+    remove: list[str] = Field(default_factory=list)
+    add: list[dict[str, str]] = Field(default_factory=list)
+    reason: str = ""
